@@ -1,7 +1,6 @@
 import io
 import math
 import os
-import re
 import tempfile
 import uuid
 import sys
@@ -22,7 +21,7 @@ from werkzeug.exceptions import HTTPException
 from werkzeug.http import http_date
 from werkzeug.utils import secure_filename
 
-from libretranslate import flood, remove_translated_files, scheduler, secret, security, storage, cache
+from libretranslate import auth, flood, remove_translated_files, scheduler, secret, security, storage, cache
 from libretranslate.language import model2iso, iso2model, detect_languages, improve_translation_formatting, get_language_with_fallback
 from libretranslate.locales import (
     _,
@@ -339,53 +338,36 @@ def create_app(args):
                 abort(403, description=_("Too many request limits violations"))
 
             if args.api_keys:
-                ak = get_req_api_key()
-                if ak and api_keys_db.lookup(ak) is None:
-                    abort(
-                        403,
-                        description=_("Invalid API key"),
-                    )
-                else:
-                  need_key = False
-                  key_missing = api_keys_db.lookup(ak) is None
+                # All "is a key required?" logic lives in libretranslate.auth so
+                # that enforcement here stays in sync with what /frontend/settings
+                # advertises (see auth.key_required).
+                decision = auth.check(
+                    args,
+                    api_keys_db,
+                    api_key=get_req_api_key(),
+                    req_secret=get_req_secret(),
+                    origin=request.headers.get("Origin", ""),
+                    ip=ip,
+                    fingerprint=get_fingerprint(),
+                )
 
-                  if (args.require_api_key_origin
-                      and key_missing
-                      and not re.match(args.require_api_key_origin, request.headers.get("Origin", ""))
-                  ):
-                    need_key = True
-
-                  req_secret = get_req_secret()
-                  if (args.require_api_key_secret
-                    and key_missing
-                    and not secret.secret_match(req_secret)
-                  ):
-                    need_key = True
-
-                    if secret.secret_bogus_match(req_secret):
-                      abort(make_response(jsonify({
+                if decision == auth.INVALID_KEY:
+                    abort(403, description=_("Invalid API key"))
+                elif decision == auth.SERVE_BOGUS:
+                    abort(make_response(jsonify({
                         'translatedText': secret.get_emoji(),
                         'alternatives': [],
                         'detectedLanguage': { 'confidence': 100, 'language': 'en' }
-                      }), 200))
-
-                  if (args.require_api_key_fingerprint
-                    and key_missing):
-                    if flood.fingerprint_mismatch(ip, get_fingerprint()):
-                      need_key = True
-
-                  if args.under_attack and key_missing:
-                    need_key = True
-
-                  if need_key:
+                    }), 200))
+                elif decision == auth.NEED_KEY:
+                    # Report before aborting: previously this report() was placed
+                    # after abort() and never ran, so keyless offenders were never
+                    # counted toward a flood ban.
+                    flood.report(ip)
                     description = _("Please contact the server operator to get an API key")
                     if args.get_api_key_link:
                         description = _("Visit %(url)s to get an API key", url=args.get_api_key_link)
-                    abort(
-                        400,
-                        description=description,
-                    )
-                    flood.report(get_remote_address())
+                    abort(400, description=description)
             return f(*a, **kw)
 
         if args.metrics:
@@ -458,7 +440,7 @@ def create_app(args):
             available_locales=sorted([{'code': l['code'], 'name': _lazy(l['name'])} for l in get_available_locales(not args.debug)], key=lambda s: s['name']),
             current_locale=get_locale(lang_cookie),
             alternate_locales=get_alternate_locale_links(),
-            under_attack=args.under_attack,
+            under_attack=auth.under_attack(args),
             hide_api=args.hide_api,
             frontend_title=args.frontend_title,
         ))
@@ -492,7 +474,7 @@ def create_app(args):
             get_api_key_link=args.get_api_key_link,
             api_secret=api_secret,
             bogus_api_secret=bogus_api_secret,
-            under_attack=args.under_attack), content_type='application/javascript; charset=utf-8')
+            under_attack=auth.under_attack(args)), content_type='application/javascript; charset=utf-8')
 
       if args.require_api_key_secret:
         response.headers['Last-Modified'] = http_date(datetime.now())
@@ -1208,7 +1190,7 @@ def create_app(args):
                 "charLimit": args.char_limit,
                 "frontendTimeout": args.frontend_timeout,
                 "apiKeys": args.api_keys,
-                "keyRequired": bool(args.api_keys and args.require_api_key_origin),
+                "keyRequired": auth.key_required(args),
                 "suggestions": args.suggestions,
                 "filesTranslation": not args.disable_files_translation,
                 "supportedFilesFormat": [] if args.disable_files_translation else frontend_argos_supported_files_format,

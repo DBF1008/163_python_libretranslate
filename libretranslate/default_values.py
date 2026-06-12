@@ -241,6 +241,11 @@ _default_options_objects = [
         'default_value': '',
         'value_type': 'str'
     },
+    {
+        'name': 'MAX_ASYNC_TASKS',
+        'default_value': 4,
+        'value_type': 'int'
+    },
 ]
 
 

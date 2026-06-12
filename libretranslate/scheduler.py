@@ -19,6 +19,10 @@ def setup(args):
         if not args.secondary and args.api_keys and args.require_api_key_secret:
             scheduler.add_job(func=rotate_secrets, trigger="interval", minutes=30)
 
+        if not args.secondary:
+            from libretranslate.file_tasks import cleanup_stale_tasks
+            scheduler.add_job(func=cleanup_stale_tasks, trigger="interval", minutes=5)
+
         scheduler.start()
 
         # Shut down the scheduler when exiting the app

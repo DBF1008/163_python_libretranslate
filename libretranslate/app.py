@@ -22,7 +22,7 @@ from werkzeug.exceptions import HTTPException
 from werkzeug.http import http_date
 from werkzeug.utils import secure_filename
 
-from libretranslate import flood, remove_translated_files, scheduler, secret, security, storage, cache
+from libretranslate import flood, remove_translated_files, scheduler, secret, security, storage, cache, file_tasks
 from libretranslate.language import model2iso, iso2model, detect_languages, improve_translation_formatting, get_language_with_fallback
 from libretranslate.locales import (
     _,
@@ -208,6 +208,7 @@ def create_app(args):
 
     if not args.disable_files_translation:
         remove_translated_files.setup(get_upload_dir())
+        file_tasks.setup(getattr(args, 'max_async_tasks', 4))
     languages = load_languages()
     language_pairs = {}
     for lang in languages:
@@ -1025,6 +1026,226 @@ def create_app(args):
             )
         except Exception as e:
             abort(500, description=e)
+
+    @bp.post("/translate_file_async")
+    @access_check
+    def translate_file_async():
+        """
+        Translate a File (Async)
+        ---
+        tags:
+          - translate
+        consumes:
+         - multipart/form-data
+        parameters:
+          - in: formData
+            name: file
+            type: file
+            required: true
+            description: File to translate
+          - in: formData
+            name: source
+            schema:
+              type: string
+              example: en
+            required: true
+            description: Source language code or "auto" for auto detection
+          - in: formData
+            name: target
+            schema:
+              type: string
+              example: es
+            required: true
+            description: Target language code
+          - in: formData
+            name: api_key
+            schema:
+              type: string
+              example: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+            required: false
+            description: API key
+        responses:
+          200:
+            description: Task created
+            schema:
+              id: translate-file-async
+              type: object
+              properties:
+                taskId:
+                  type: string
+                  description: Unique task identifier
+                status:
+                  type: string
+                  description: Current task status
+                statusUrl:
+                  type: string
+                  description: URL to poll for task status
+          400:
+            description: Invalid request
+            schema:
+              id: error-response
+              type: object
+              properties:
+                error:
+                  type: string
+                  description: Error message
+          403:
+            description: Banned
+            schema:
+              id: error-response
+              type: object
+              properties:
+                error:
+                  type: string
+                  description: Error message
+          429:
+            description: Slow down
+            schema:
+              id: error-slow-down
+              type: object
+              properties:
+                error:
+                  type: string
+                  description: Reason for slow down
+        """
+        if args.disable_files_translation:
+            abort(403, description=_("Files translation are disabled on this server."))
+
+        source_lang = iso2model(request.form.get("source"))
+        target_lang = iso2model(request.form.get("target"))
+        file = request.files['file']
+        char_limit = get_char_limit(args.char_limit, api_keys_db)
+
+        if not file:
+            abort(400, description=_("Invalid request: missing %(name)s parameter", name='file'))
+        if not source_lang:
+            abort(400, description=_("Invalid request: missing %(name)s parameter", name='source'))
+        if not target_lang:
+            abort(400, description=_("Invalid request: missing %(name)s parameter", name='target'))
+
+        if file.filename == '':
+            abort(400, description=_("Invalid request: empty file"))
+
+        if os.path.splitext(file.filename)[1] not in frontend_argos_supported_files_format:
+            abort(400, description=_("Invalid request: file format not supported"))
+
+        src_lang = next((l for l in languages if l.code == source_lang), None)
+
+        if src_lang is None and source_lang != "auto":
+            abort(400, description=_("%(lang)s is not supported", lang=source_lang))
+
+        tgt_lang = next((l for l in languages if l.code == target_lang), None)
+
+        if tgt_lang is None:
+            abort(400, description=_("%(lang)s is not supported", lang=target_lang))
+
+        try:
+            filename = str(uuid.uuid4()) + '.' + secure_filename(file.filename)
+            filepath = os.path.join(get_upload_dir(), filename)
+
+            file.save(filepath)
+
+            req_cost = 1
+            if char_limit > 0:
+                req_cost = max(1, int(os.path.getsize(filepath) / char_limit))
+                request.req_cost = req_cost
+
+            if source_lang == "auto":
+                src_texts = argostranslatefiles.get_texts(filepath)
+                candidate_langs = detect_languages(src_texts)
+                detected_src_lang = candidate_langs[0]
+                src_lang = get_language_with_fallback(detected_src_lang["language"], languages)
+                if src_lang is None:
+                    abort(400, description=_("%(lang)s is not supported", lang=detected_src_lang["language"]))
+
+            translator = src_lang.get_translation(tgt_lang)
+
+            task = file_tasks.create_task(
+                source_lang=src_lang.code,
+                target_lang=tgt_lang.code,
+                filename=filename,
+                req_cost=req_cost,
+                api_key=get_req_api_key(),
+                client_ip=get_remote_address(),
+            )
+
+            file_tasks.submit_translation(
+                task_id=task["task_id"],
+                translator=translator,
+                filepath=filepath,
+                upload_dir=get_upload_dir(),
+            )
+
+            return jsonify({
+                "taskId": task["task_id"],
+                "status": task["status"],
+                "statusUrl": url_for('Main app.get_task_status', task_id=task["task_id"]),
+            })
+        except Exception as e:
+            abort(500, description=e)
+
+    @bp.get("/tasks/<string:task_id>")
+    @limiter.exempt
+    def get_task_status(task_id):
+        """
+        Get async translation task status
+        ---
+        tags:
+          - translate
+        parameters:
+          - in: path
+            name: task_id
+            type: string
+            required: true
+            description: Task identifier returned by /translate_file_async
+        responses:
+          200:
+            description: Task status
+            schema:
+              id: task-status
+              type: object
+              properties:
+                taskId:
+                  type: string
+                status:
+                  type: string
+                  description: pending, processing, completed, or failed
+                translatedFileUrl:
+                  type: string
+                  description: URL to download translated file (only when completed)
+                error:
+                  type: string
+                  description: Error message (only when failed)
+          404:
+            description: Task not found or expired
+            schema:
+              id: error-response
+              type: object
+              properties:
+                error:
+                  type: string
+                  description: Error message
+        """
+        task = file_tasks.get_task(task_id)
+        if task is None:
+            abort(404, description=_("Task not found or expired"))
+
+        result = {
+            "taskId": task["task_id"],
+            "status": task["status"],
+            "created": task["created"],
+        }
+
+        if task["status"] == file_tasks.TaskStatus.COMPLETED and task.get("translated_filename"):
+            result["translatedFileUrl"] = url_for(
+                'Main app.download_file',
+                filename=task["translated_filename"],
+                _external=True,
+            )
+        elif task["status"] == file_tasks.TaskStatus.FAILED:
+            result["error"] = task.get("error", "Unknown error")
+
+        return jsonify(result)
 
     @bp.get("/download_file/<string:filename>")
     def download_file(filename: str):

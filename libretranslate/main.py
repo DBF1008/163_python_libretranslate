@@ -216,6 +216,13 @@ def get_parser():
         help="Disable files translation"
     )
     parser.add_argument(
+        "--max-async-tasks",
+        default=DEFARGS['MAX_ASYNC_TASKS'],
+        type=int,
+        metavar="<number>",
+        help="Maximum number of concurrent async file translation tasks (%(default)s)",
+    )
+    parser.add_argument(
         "--disable-web-ui", default=DEFARGS['DISABLE_WEB_UI'], action="store_true", help="Disable web ui"
     )
     parser.add_argument(

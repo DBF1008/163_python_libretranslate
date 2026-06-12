@@ -1,4 +1,3 @@
-import io
 import math
 import os
 import re
@@ -1034,24 +1033,25 @@ def create_app(args):
         if args.disable_files_translation:
             abort(400, description=_("Files translation are disabled on this server."))
 
-        filepath = os.path.join(get_upload_dir(), filename)
+        upload_dir = get_upload_dir()
+        filepath = os.path.join(upload_dir, filename)
         try:
-            checked_filepath = security.path_traversal_check(filepath, get_upload_dir())
-            if os.path.isfile(checked_filepath):
-                filepath = checked_filepath
+            # Reject any filename that resolves outside the upload directory
+            # (path traversal, sibling directories sharing a name prefix, ...).
+            filepath = security.path_traversal_check(filepath, upload_dir)
         except security.SuspiciousFileOperationError:
             abort(400, description=_("Invalid filename"))
 
-        return_data = io.BytesIO()
-        with open(filepath, 'rb') as fo:
-            return_data.write(fo.read())
-        return_data.seek(0)
+        if not os.path.isfile(filepath):
+            abort(404, description=_("Invalid filename"))
 
         download_filename = filename.split('.')
         download_filename.pop(0)
         download_filename = '.'.join(download_filename)
 
-        return send_file(return_data, as_attachment=True, download_name=download_filename)
+        # Stream the file straight from disk instead of buffering the whole
+        # payload in memory, so large downloads don't exhaust worker memory.
+        return send_file(filepath, as_attachment=True, download_name=download_filename)
 
     @bp.post("/detect")
     @access_check

@@ -69,6 +69,7 @@ ltmanage = "libretranslate.manage:manage"
 test = [
     "pytest >=7.2.0",
     "pytest-cov",
+    "fakeredis",
     "pre-commit >=3.0.0",
     "types-requests",
     "pip-audit"

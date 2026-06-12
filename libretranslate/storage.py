@@ -49,7 +49,7 @@ class MemoryStorage(Storage):
         self.store[key] = bool(value)
 
     def get_bool(self, key):
-        return bool(self.store[key])
+        return bool(self.store.get(key, False))
 
     def set_int(self, key, value):
         self.store[key] = int(value)
@@ -87,28 +87,29 @@ class MemoryStorage(Storage):
         if ns not in self.store:
             self.store[ns] = {}
 
-        if key not in self.store[ns]:
-            self.store[ns][key] = 0
-        else:
-            self.store[ns][key] += 1
+        # Match Redis HINCRBY: counters are 1-based (first increment yields 1)
+        # and the new value is returned.
+        self.store[ns][key] = self.store[ns].get(key, 0) + 1
+        return self.store[ns][key]
 
     def dec_hash_int(self, ns, key):
         if ns not in self.store:
             self.store[ns] = {}
 
-        if key not in self.store[ns]:
-            self.store[ns][key] = 0
-        else:
-            self.store[ns][key] -= 1
+        # Match Redis HINCRBY -1: a missing field decrements to -1 and the new
+        # value is returned.
+        self.store[ns][key] = self.store[ns].get(key, 0) - 1
+        return self.store[ns][key]
 
     def get_all_hash_int(self, ns):
-        if ns in self.store:
-            return [{str(k): int(v)} for k,v in self.store[ns].items()]
-        else:
-            return []
+        # Match RedisStorage: return a flat {field: int} mapping.
+        d = self.store.get(ns, {})
+        return {str(k): int(v) for k, v in d.items()}
 
     def del_hash(self, ns, key):
-        del self.store[ns][key]
+        # Match Redis HDEL: deleting a missing field is a no-op.
+        if ns in self.store and key in self.store[ns]:
+            del self.store[ns][key]
 
 
 class RedisStorage(Storage):
@@ -123,7 +124,7 @@ class RedisStorage(Storage):
         self.conn.set(key, "1" if value else "0")
 
     def get_bool(self, key):
-        return bool(self.conn.get(key))
+        return self.conn.get(key) == b"1"
 
     def set_int(self, key, value):
         self.conn.set(key, str(value))
@@ -133,7 +134,7 @@ class RedisStorage(Storage):
         if v is None:
             return 0
         else:
-            return v
+            return int(v)
 
     def set_str(self, key, value, ex=None):
         self.conn.set(key, value, ex=ex)

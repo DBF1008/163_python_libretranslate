@@ -206,6 +206,17 @@ def create_app(args):
     storage.setup(args.shared_storage)
     trans_cache = cache.setup(args.translation_cache)
 
+    # Normalize CORS config
+    def _parse_list(val):
+        if isinstance(val, list):
+            return [v.strip() for v in val if v.strip()]
+        return [v.strip() for v in val.split(",") if v.strip()]
+
+    cors_origins = _parse_list(args.cors_origins)
+    cors_expose_headers = ", ".join(_parse_list(args.cors_expose_headers))
+    cors_allow_credentials = args.cors_allow_credentials
+    cors_wildcard = "*" in cors_origins
+
     if not args.disable_files_translation:
         remove_translated_files.setup(get_upload_dir())
     languages = load_languages()
@@ -559,17 +570,31 @@ def create_app(args):
         """
         return jsonify({"status": "ok"})
 
+    # CORS preflight handler
+    @bp.before_request
+    def cors_preflight():
+        if request.method == "OPTIONS":
+            return make_response("", 204)
+
     # Add cors
     @bp.after_request
     def after_request(response):
-        response.headers.add("Access-Control-Allow-Origin", "*")
-        response.headers.add(
-            "Access-Control-Allow-Headers", "Authorization, Content-Type"
-        )
-        response.headers.add("Access-Control-Expose-Headers", "Authorization")
-        response.headers.add("Access-Control-Allow-Methods", "GET, POST")
-        response.headers.add("Access-Control-Allow-Credentials", "true")
-        response.headers.add("Access-Control-Max-Age", 60 * 60 * 24 * 20)
+        origin = request.headers.get("Origin")
+
+        if cors_wildcard:
+            response.headers["Access-Control-Allow-Origin"] = "*"
+        elif origin and origin in cors_origins:
+            response.headers["Access-Control-Allow-Origin"] = origin
+            response.headers.add("Vary", "Origin")
+
+        response.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type"
+        response.headers["Access-Control-Expose-Headers"] = cors_expose_headers
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST"
+        response.headers["Access-Control-Max-Age"] = str(60 * 60 * 24 * 20)
+
+        if cors_allow_credentials and not cors_wildcard:
+            response.headers["Access-Control-Allow-Credentials"] = "true"
+
         return response
 
     @bp.post("/translate")

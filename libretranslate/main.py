@@ -249,6 +249,26 @@ def get_parser():
         type=str,
         help="Add a prefix like /url-prefix to URL: example.com:5000/url-prefix/",
     )
+    parser.add_argument(
+        "--cors-origins",
+        type=operator.methodcaller("split", ","),
+        default=DEFARGS['CORS_ORIGINS'],
+        metavar="<comma-separated origins or '*'>",
+        help="Allowed CORS origins. Use '*' for all origins (default). (%(default)s)",
+    )
+    parser.add_argument(
+        "--cors-allow-credentials",
+        default=DEFARGS['CORS_ALLOW_CREDENTIALS'],
+        action="store_true",
+        help="Allow credentials in CORS requests (default: True)",
+    )
+    parser.add_argument(
+        "--cors-expose-headers",
+        type=operator.methodcaller("split", ","),
+        default=DEFARGS['CORS_EXPOSE_HEADERS'],
+        metavar="<comma-separated headers>",
+        help="Headers to expose to browser JS (%(default)s)",
+    )
     return parser
 
 def get_args():

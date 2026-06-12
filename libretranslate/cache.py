@@ -1,5 +1,5 @@
 from libretranslate.storage import get_storage
-import hashlib
+from libretranslate.translate import cache_fingerprint
 import json
 import gzip
 
@@ -21,9 +21,7 @@ class TranslationCache:
         return self.enabled and (self.cache_all or ak in self.api_keys)
 
     def hit(self, src_texts, source_lang, target_lang, text_format, num_alternatives):
-        text_blob = "|".join(src_texts) if isinstance(src_texts, list) else src_texts
-        fingerprint = f"{text_blob}:{source_lang}:{target_lang}:{text_format}:{num_alternatives}"
-        cache_key = "tcache_" + hashlib.md5(fingerprint.encode('utf-8')).hexdigest()
+        cache_key = cache_fingerprint(src_texts, source_lang, target_lang, text_format, num_alternatives)
 
         cached = self.storage.get_str(cache_key, raw=True)
         if len(cached) == 0:
@@ -41,8 +39,7 @@ class TranslationCache:
         try:
             if isinstance(content, dict):
                 content = json.dumps(content)
-                compressed = gzip.compress(content.encode('utf-8'))
-                
+            compressed = gzip.compress(content.encode('utf-8'))
             self.storage.set_str(cache_key, compressed, self.expire)
         except Exception as e:
             print(str(e))

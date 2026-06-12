@@ -1,3 +1,4 @@
+import atexit
 import io
 import math
 import os
@@ -22,7 +23,7 @@ from werkzeug.exceptions import HTTPException
 from werkzeug.http import http_date
 from werkzeug.utils import secure_filename
 
-from libretranslate import flood, remove_translated_files, scheduler, secret, security, storage, cache
+from libretranslate import files_translation, flood, remove_translated_files, scheduler, secret, security, storage, cache
 from libretranslate.language import model2iso, iso2model, detect_languages, improve_translation_formatting, get_language_with_fallback
 from libretranslate.locales import (
     _,
@@ -206,8 +207,11 @@ def create_app(args):
     storage.setup(args.shared_storage)
     trans_cache = cache.setup(args.translation_cache)
 
+    file_tasks = None
     if not args.disable_files_translation:
         remove_translated_files.setup(get_upload_dir())
+        file_tasks = files_translation.FileTranslationTasks(max_workers=args.threads)
+        atexit.register(file_tasks.shutdown)
     languages = load_languages()
     language_pairs = {}
     for lang in languages:
@@ -878,6 +882,24 @@ def create_app(args):
             raise e
             abort(500, description=_("Cannot translate text: %(text)s", text=str(e)))
 
+    def resolve_and_translate(filepath, source_lang, tgt_lang):
+        """Resolve the source language (auto-detecting when needed) and translate the file.
+
+        Shared by the synchronous and asynchronous code paths. Returns the path
+        to the translated file; raises on failure.
+        """
+        src_lang = next((l for l in languages if l.code == source_lang), None)
+
+        if source_lang == "auto":
+            src_texts = argostranslatefiles.get_texts(filepath)
+            candidate_langs = detect_languages(src_texts)
+            detected_src_lang = candidate_langs[0]
+            src_lang = get_language_with_fallback(detected_src_lang["language"], languages)
+            if src_lang is None:
+                abort(400, description=_("%(lang)s is not supported", lang=detected_src_lang["language"]))
+
+        return argostranslatefiles.translate_file(src_lang.get_translation(tgt_lang), filepath)
+
     @bp.post("/translate_file")
     @access_check
     def translate_file():
@@ -915,6 +937,13 @@ def create_app(args):
               example: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
             required: false
             description: API key
+          - in: formData
+            name: async
+            schema:
+              type: boolean
+              example: false
+            required: false
+            description: When true, queue the translation and return a task id immediately instead of blocking until it completes
         responses:
           200:
             description: Translated file
@@ -925,6 +954,21 @@ def create_app(args):
                 translatedFileUrl:
                   type: string
                   description: Translated file url
+          202:
+            description: Asynchronous translation task accepted
+            schema:
+              id: translate-file-task
+              type: object
+              properties:
+                id:
+                  type: string
+                  description: Task id
+                status:
+                  type: string
+                  description: Task status
+                statusUrl:
+                  type: string
+                  description: URL to poll for task status
           400:
             description: Invalid request
             schema:
@@ -993,6 +1037,8 @@ def create_app(args):
         if tgt_lang is None:
             abort(400, description=_("%(lang)s is not supported", lang=target_lang))
 
+        is_async = str(request.form.get("async", "")).lower() in ("1", "true", "yes", "on")
+
         try:
             filename = str(uuid.uuid4()) + '.' + secure_filename(file.filename)
             filepath = os.path.join(get_upload_dir(), filename)
@@ -1007,15 +1053,21 @@ def create_app(args):
             if char_limit > 0:
                 request.req_cost = max(1, int(os.path.getsize(filepath) / char_limit))
 
-            if source_lang == "auto":
-                src_texts = argostranslatefiles.get_texts(filepath)
-                candidate_langs = detect_languages(src_texts)
-                detected_src_lang = candidate_langs[0]
-                src_lang = get_language_with_fallback(detected_src_lang["language"], languages)
-                if src_lang is None:
-                    abort(400, description=_("%(lang)s is not supported", lang=detected_src_lang["language"]))
+            if is_async:
+                # Defer the (potentially slow) auto-detection and translation to
+                # a background worker and return a task id the client can poll.
+                # url_for is resolved here, in request context; the worker only
+                # produces a filename. The app context lets _() work off-thread.
+                def job():
+                    with app.app_context():
+                        return resolve_and_translate(filepath, source_lang, tgt_lang)
 
-            translated_file_path = argostranslatefiles.translate_file(src_lang.get_translation(tgt_lang), filepath)
+                task = file_tasks.submit(source_lang, target_lang, file.filename, job)
+                body = task.to_dict()
+                body["statusUrl"] = url_for('Main app.translate_file_status', task_id=task.id, _external=True)
+                return jsonify(body), 202
+
+            translated_file_path = resolve_and_translate(filepath, source_lang, tgt_lang)
             translated_filename = os.path.basename(translated_file_path)
 
             return jsonify(
@@ -1025,6 +1077,71 @@ def create_app(args):
             )
         except Exception as e:
             abort(500, description=e)
+
+    @bp.get("/translate_file_status/<string:task_id>")
+    def translate_file_status(task_id: str):
+        """
+        Get the status of an asynchronous file translation task
+        ---
+        tags:
+          - translate
+        parameters:
+          - in: path
+            name: task_id
+            type: string
+            required: true
+            description: Task id returned by /translate_file when async=true
+        responses:
+          200:
+            description: Task status
+            schema:
+              id: translate-file-status
+              type: object
+              properties:
+                id:
+                  type: string
+                  description: Task id
+                status:
+                  type: string
+                  description: One of queued, running, completed, failed
+                translatedFileUrl:
+                  type: string
+                  description: Translated file url (present when status is completed)
+                error:
+                  type: string
+                  description: Error message (present when status is failed)
+          404:
+            description: Task not found
+            schema:
+              id: error-response
+              type: object
+              properties:
+                error:
+                  type: string
+                  description: Error message
+          403:
+            description: Files translation are disabled on this server
+            schema:
+              id: error-response
+              type: object
+              properties:
+                error:
+                  type: string
+                  description: Error message
+        """
+        if args.disable_files_translation:
+            abort(403, description=_("Files translation are disabled on this server."))
+
+        task = file_tasks.get(task_id) if file_tasks is not None else None
+        if task is None:
+            abort(404, description=_("Task not found"))
+
+        body = task.to_dict()
+        body["statusUrl"] = url_for('Main app.translate_file_status', task_id=task.id, _external=True)
+        if task.status == files_translation.STATUS_COMPLETED and task.translated_filename:
+            body["translatedFileUrl"] = url_for('Main app.download_file', filename=task.translated_filename, _external=True)
+
+        return jsonify(body)
 
     @bp.get("/download_file/<string:filename>")
     def download_file(filename: str):

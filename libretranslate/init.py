@@ -73,8 +73,6 @@ def check_and_install_models(force=False, load_only_lang_codes=None,update=False
         print("Downloading MiniSBD models")
         download_models(load_only_lang_codes, print)
 
-        # reload installed languages
-        libretranslate.language.languages = translate.get_installed_languages()
         print(
             f"Loaded support for {len(translate.get_installed_languages())} languages ({len(available_packages)} models total)!"
         )

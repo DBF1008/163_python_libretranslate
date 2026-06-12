@@ -8,7 +8,6 @@ import sys
 import warnings
 from datetime import datetime
 from functools import wraps
-from html import unescape
 from timeit import default_timer
 
 import argostranslatefiles
@@ -17,13 +16,13 @@ from flask import Blueprint, Flask, Response, abort, jsonify, render_template, r
 from flask_babel import Babel
 from flask_swagger import swagger
 from flask_swagger_ui import get_swaggerui_blueprint
-from argostranslatefiles.translatehtml import translate_html
 from werkzeug.exceptions import HTTPException
 from werkzeug.http import http_date
 from werkzeug.utils import secure_filename
 
 from libretranslate import flood, remove_translated_files, scheduler, secret, security, storage, cache
-from libretranslate.language import model2iso, iso2model, detect_languages, improve_translation_formatting, get_language_with_fallback
+from libretranslate.language import model2iso, iso2model
+from libretranslate.translation import TranslationService, TranslationError
 from libretranslate.locales import (
     _,
     _lazy,
@@ -37,20 +36,6 @@ from libretranslate.locales import (
 
 from .api_keys import Database, RemoteDatabase
 from .suggestions import Database as SuggestionsDatabase
-
-# Rough map of emoji characters
-emojis = {e: True for e in \
-  [ord(' ')] +                    # Spaces
-  list(range(0x1F600,0x1F64F)) +  # Emoticons
-  list(range(0x1F300,0x1F5FF)) +  # Misc Symbols and Pictographs
-  list(range(0x1F680,0x1F6FF)) +  # Transport and Map
-  list(range(0x2600,0x26FF)) +    # Misc symbols
-  list(range(0x2700,0x27BF)) +    # Dingbats
-  list(range(0xFE00,0xFE0F)) +    # Variation Selectors
-  list(range(0x1F900,0x1F9FF)) +  # Supplemental Symbols and Pictographs
-  list(range(0x1F1E6,0x1F1FF)) +  # Flags
-  list(range(0x20D0,0x20FF))      # Combining Diacritical Marks for Symbols
-}
 
 def get_version():
     try:
@@ -173,23 +158,6 @@ def get_routes_limits(args, api_keys_db):
 
     return res
 
-def filter_unique(seq, extra):
-    seen = set({extra, ""})
-    seen_add = seen.add
-    return [x for x in seq if not (x in seen or seen_add(x))]
-
-
-def detect_translatable(src_texts):
-  if isinstance(src_texts, list):
-    return any(detect_translatable(t) for t in src_texts)
-
-  for ch in src_texts:
-    if not (ord(ch) in emojis):
-      return True
-
-  # All emojis
-  return False
-
 
 def create_app(args):
     from libretranslate.init import boot
@@ -212,6 +180,8 @@ def create_app(args):
     language_pairs = {}
     for lang in languages:
         language_pairs[lang.code] = sorted([l.to_lang.code for l in lang.translations_from])
+
+    translation_service = TranslationService(languages, trans_cache)
 
     # Map userdefined frontend languages to argos language object.
     if args.frontend_language_source == "auto":
@@ -772,10 +742,10 @@ def create_app(args):
         src_texts = q if batch else [q]
 
         ak = get_req_api_key()
-        cache_key = None
-        if trans_cache.should_check(ak):
-          cache_key, hit = trans_cache.hit(src_texts, source_lang, target_lang, text_format, num_alternatives)
-          if hit is not None:
+        cache_key, hit = translation_service.check_cache(
+            ak, src_texts, source_lang, target_lang, text_format, num_alternatives
+        )
+        if hit is not None:
             return Response(hit, status=200, mimetype="application/json")
 
         if char_limit != -1:
@@ -789,93 +759,18 @@ def create_app(args):
         if batch:
             request.req_cost = max(1, len(q))
 
-        translatable = detect_translatable(src_texts)
-        if translatable:
-          if source_lang == "auto":
-              candidate_langs = detect_languages(src_texts)
-              detected_src_lang = candidate_langs[0]
-              src_lang = get_language_with_fallback(detected_src_lang["language"], languages)
-          else:
-              detected_src_lang = {"confidence": 100.0, "language": source_lang}
-              src_lang = next((l for l in languages if l.code == source_lang), None)
-        else:
-          detected_src_lang = {"confidence": 0.0, "language": "en"}
-          src_lang = next((l for l in languages if l.code == "en"), None)
-
-        if src_lang is None:
-            abort(400, description=_("%(lang)s is not supported", lang=source_lang))
-
-        tgt_lang = next((l for l in languages if l.code == target_lang), None)
-
-        if tgt_lang is None:
-            abort(400, description=_("%(lang)s is not supported",lang=target_lang))
-
-        if not text_format:
-            text_format = "text"
-
-        if text_format not in ["text", "html"]:
-            abort(400, description=_("%(format)s format is not supported", format=text_format))
-
         try:
-            if batch:
-                batch_results = []
-                batch_alternatives = []
-                for text in q:
-                    translator = src_lang.get_translation(tgt_lang)
-                    if translator is None:
-                        abort(400, description=_("%(tname)s (%(tcode)s) is not available as a target language from %(sname)s (%(scode)s)", tname=_lazy(tgt_lang.name), tcode=tgt_lang.code, sname=_lazy(src_lang.name), scode=src_lang.code))
-
-                    if translatable:
-                      if text_format == "html":
-                          translated_text = unescape(str(translate_html(translator, text)))
-                          alternatives = [] # Not supported for html yet
-                      else:
-                          hypotheses = translator.hypotheses(text, num_alternatives + 1)
-                          translated_text = unescape(improve_translation_formatting(text, hypotheses[0].value))
-                          alternatives = filter_unique([unescape(improve_translation_formatting(text, hypotheses[i].value)) for i in range(1, len(hypotheses))], translated_text)
-                    else:
-                      translated_text = text # Cannot translate, send the original text back
-                      alternatives = []
-
-                    batch_results.append(translated_text)
-                    batch_alternatives.append(alternatives)
-
-                result = {"translatedText": batch_results}
-
-                if source_lang == "auto":
-                    result["detectedLanguage"] = [model2iso(detected_src_lang)] * len(q)
-                if num_alternatives > 0:
-                    result["alternatives"] = batch_alternatives
-            else:
-                translator = src_lang.get_translation(tgt_lang)
-                if translator is None:
-                    abort(400, description=_("%(tname)s (%(tcode)s) is not available as a target language from %(sname)s (%(scode)s)", tname=_lazy(tgt_lang.name), tcode=tgt_lang.code, sname=_lazy(src_lang.name), scode=src_lang.code))
-
-                if translatable:
-                  if text_format == "html":
-                      translated_text = unescape(str(translate_html(translator, q)))
-                      alternatives = [] # Not supported for html yet
-                  else:
-                      hypotheses = translator.hypotheses(q, num_alternatives + 1)
-                      translated_text = unescape(improve_translation_formatting(q, hypotheses[0].value))
-                      alternatives = filter_unique([unescape(improve_translation_formatting(q, hypotheses[i].value)) for i in range(1, len(hypotheses))], translated_text)
-                else:
-                  translated_text = q # Cannot translate, send the original text back
-                  alternatives = []
-
-                result = {"translatedText": translated_text}
-
-                if source_lang == "auto":
-                    result["detectedLanguage"] = model2iso(detected_src_lang)
-                if num_alternatives > 0:
-                    result["alternatives"] = alternatives
-            
-            if cache_key is not None:
-              trans_cache.cache(cache_key, result)
-
+            result = translation_service.build_response(
+                src_texts, source_lang, target_lang,
+                text_format=text_format,
+                num_alternatives=num_alternatives,
+                is_batch=batch,
+            )
+            translation_service.store_cache(cache_key, result)
             return jsonify(result)
+        except TranslationError as e:
+            abort(400, description=str(e))
         except Exception as e:
-            raise e
             abort(500, description=_("Cannot translate text: %(text)s", text=str(e)))
 
     @bp.post("/translate_file")
@@ -983,15 +878,10 @@ def create_app(args):
         if os.path.splitext(file.filename)[1] not in frontend_argos_supported_files_format:
             abort(400, description=_("Invalid request: file format not supported"))
 
-        src_lang = next((l for l in languages if l.code == source_lang), None)
-
-        if src_lang is None and source_lang != "auto":
-            abort(400, description=_("%(lang)s is not supported", lang=source_lang))
-
-        tgt_lang = next((l for l in languages if l.code == target_lang), None)
-
-        if tgt_lang is None:
-            abort(400, description=_("%(lang)s is not supported", lang=target_lang))
+        try:
+            tgt_lang = translation_service.resolve_target_language(target_lang)
+        except TranslationError as e:
+            abort(400, description=str(e))
 
         try:
             filename = str(uuid.uuid4()) + '.' + secure_filename(file.filename)
@@ -1009,11 +899,19 @@ def create_app(args):
 
             if source_lang == "auto":
                 src_texts = argostranslatefiles.get_texts(filepath)
-                candidate_langs = detect_languages(src_texts)
-                detected_src_lang = candidate_langs[0]
-                src_lang = get_language_with_fallback(detected_src_lang["language"], languages)
-                if src_lang is None:
-                    abort(400, description=_("%(lang)s is not supported", lang=detected_src_lang["language"]))
+                try:
+                    src_lang, _, _ = translation_service.resolve_source_language(
+                        source_lang, src_texts
+                    )
+                except TranslationError as e:
+                    abort(400, description=str(e))
+            else:
+                try:
+                    src_lang = translation_service.resolve_source_language(
+                        source_lang, []
+                    )[0]
+                except TranslationError as e:
+                    abort(400, description=str(e))
 
             translated_file_path = argostranslatefiles.translate_file(src_lang.get_translation(tgt_lang), filepath)
             translated_filename = os.path.basename(translated_file_path)
@@ -1024,7 +922,7 @@ def create_app(args):
                 }
             )
         except Exception as e:
-            abort(500, description=e)
+            abort(500, description=str(e))
 
     @bp.get("/download_file/<string:filename>")
     def download_file(filename: str):
@@ -1142,7 +1040,7 @@ def create_app(args):
         if not q:
             abort(400, description=_("Invalid request: missing %(name)s parameter", name='q'))
 
-        return jsonify(model2iso(detect_languages(q)))
+        return jsonify(translation_service.detect_language(q))
 
     @bp.route("/frontend/settings")
     @limiter.exempt

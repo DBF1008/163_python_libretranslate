@@ -34,6 +34,7 @@ class TranslationCache:
                 cached = gzip.decompress(cached).decode('utf-8')
             except Exception as e:
                 print(str(e))
+                cached = None
 
         return cache_key, cached
 

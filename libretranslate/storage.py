@@ -103,9 +103,9 @@ class MemoryStorage(Storage):
 
     def get_all_hash_int(self, ns):
         if ns in self.store:
-            return [{str(k): int(v)} for k,v in self.store[ns].items()]
+            return {str(k): int(v) for k,v in self.store[ns].items()}
         else:
-            return []
+            return {}
 
     def del_hash(self, ns, key):
         del self.store[ns][key]

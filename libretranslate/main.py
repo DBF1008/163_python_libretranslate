@@ -249,6 +249,27 @@ def get_parser():
         type=str,
         help="Add a prefix like /url-prefix to URL: example.com:5000/url-prefix/",
     )
+    parser.add_argument(
+        "--cors-origins",
+        default=DEFARGS['CORS_ORIGINS'],
+        type=str,
+        metavar="<comma-separated origins or '*'>",
+        help="Set allowed CORS origins. Use '*' to allow all origins (the default), or a comma-separated list of origins to restrict cross-origin access. Restricting origins also enables credentialed (cookie/Authorization) browser requests (%(default)s)",
+    )
+    parser.add_argument(
+        "--cors-methods",
+        default=DEFARGS['CORS_METHODS'],
+        type=str,
+        metavar="<comma-separated HTTP methods>",
+        help="Set the HTTP methods advertised in the CORS Access-Control-Allow-Methods header, including for preflight requests (%(default)s)",
+    )
+    parser.add_argument(
+        "--cors-headers",
+        default=DEFARGS['CORS_HEADERS'],
+        type=str,
+        metavar="<comma-separated request headers>",
+        help="Set the request headers advertised in the CORS Access-Control-Allow-Headers header, including for preflight requests (%(default)s)",
+    )
     return parser
 
 def get_args():

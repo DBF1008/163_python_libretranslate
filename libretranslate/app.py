@@ -559,17 +559,29 @@ def create_app(args):
         """
         return jsonify({"status": "ok"})
 
-    # Add cors
+    # Add CORS headers. Allowed origins, methods and request headers are
+    # configurable (see --cors-origins/--cors-methods/--cors-headers). "*"
+    # allows every origin (default). When origins are restricted to a list, the
+    # matching request Origin is echoed back and credentials are allowed -- the
+    # only spec-compliant way to support credentialed cross-origin requests.
+    cors_origins = [o.strip() for o in args.cors_origins.split(",") if o.strip()]
+    cors_allow_all_origins = "*" in cors_origins
+
     @bp.after_request
     def after_request(response):
-        response.headers.add("Access-Control-Allow-Origin", "*")
-        response.headers.add(
-            "Access-Control-Allow-Headers", "Authorization, Content-Type"
-        )
-        response.headers.add("Access-Control-Expose-Headers", "Authorization")
-        response.headers.add("Access-Control-Allow-Methods", "GET, POST")
-        response.headers.add("Access-Control-Allow-Credentials", "true")
-        response.headers.add("Access-Control-Max-Age", 60 * 60 * 24 * 20)
+        if cors_allow_all_origins:
+            response.headers["Access-Control-Allow-Origin"] = "*"
+            response.headers["Access-Control-Allow-Credentials"] = "true"
+        else:
+            response.headers.add("Vary", "Origin")
+            request_origin = request.headers.get("Origin")
+            if request_origin and request_origin in cors_origins:
+                response.headers["Access-Control-Allow-Origin"] = request_origin
+                response.headers["Access-Control-Allow-Credentials"] = "true"
+        response.headers["Access-Control-Allow-Headers"] = args.cors_headers
+        response.headers["Access-Control-Expose-Headers"] = "Authorization"
+        response.headers["Access-Control-Allow-Methods"] = args.cors_methods
+        response.headers["Access-Control-Max-Age"] = str(60 * 60 * 24 * 20)
         return response
 
     @bp.post("/translate")

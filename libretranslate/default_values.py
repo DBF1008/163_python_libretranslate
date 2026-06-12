@@ -241,6 +241,21 @@ _default_options_objects = [
         'default_value': '',
         'value_type': 'str'
     },
+    {
+        'name': 'CORS_ORIGINS',
+        'default_value': '*',
+        'value_type': 'str'
+    },
+    {
+        'name': 'CORS_METHODS',
+        'default_value': 'GET, POST',
+        'value_type': 'str'
+    },
+    {
+        'name': 'CORS_HEADERS',
+        'default_value': 'Authorization, Content-Type',
+        'value_type': 'str'
+    },
 ]
 
 

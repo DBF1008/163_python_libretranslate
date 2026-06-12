@@ -115,6 +115,23 @@ def get_fingerprint():
     return request.headers.get("User-Agent", "") + request.headers.get("Cookie", "")
 
 
+def is_key_required(args):
+    """Configuration-level check: does the server require an API key for
+    unauthenticated requests?  Shared by access_check and /frontend/settings
+    so that backend enforcement and frontend reporting stay in sync."""
+    if not args.api_keys:
+        return False
+    if args.under_attack:
+        return True
+    if args.require_api_key_origin:
+        return True
+    if args.require_api_key_secret:
+        return True
+    if args.require_api_key_fingerprint:
+        return True
+    return False
+
+
 def get_req_limits(default_limit, api_keys_db, db_multiplier=1, multiplier=1):
     req_limit = default_limit
 
@@ -338,7 +355,7 @@ def create_app(args):
             if flood.is_banned(ip):
                 abort(403, description=_("Too many request limits violations"))
 
-            if args.api_keys:
+            if is_key_required(args):
                 ak = get_req_api_key()
                 if ak and api_keys_db.lookup(ak) is None:
                     abort(
@@ -378,6 +395,7 @@ def create_app(args):
                     need_key = True
 
                   if need_key:
+                    flood.report(get_remote_address())
                     description = _("Please contact the server operator to get an API key")
                     if args.get_api_key_link:
                         description = _("Visit %(url)s to get an API key", url=args.get_api_key_link)
@@ -385,7 +403,6 @@ def create_app(args):
                         400,
                         description=description,
                     )
-                    flood.report(get_remote_address())
             return f(*a, **kw)
 
         if args.metrics:
@@ -1171,6 +1188,9 @@ def create_app(args):
                 keyRequired:
                   type: boolean
                   description: Whether an API key is required.
+                underAttack:
+                  type: boolean
+                  description: Whether the server is in under-attack mode.
                 suggestions:
                   type: boolean
                   description: Whether submitting suggestions is enabled.
@@ -1208,7 +1228,8 @@ def create_app(args):
                 "charLimit": args.char_limit,
                 "frontendTimeout": args.frontend_timeout,
                 "apiKeys": args.api_keys,
-                "keyRequired": bool(args.api_keys and args.require_api_key_origin),
+                "keyRequired": is_key_required(args),
+                "underAttack": args.under_attack,
                 "suggestions": args.suggestions,
                 "filesTranslation": not args.disable_files_translation,
                 "supportedFilesFormat": [] if args.disable_files_translation else frontend_argos_supported_files_format,

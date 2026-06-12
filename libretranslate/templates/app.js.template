@@ -177,7 +177,7 @@ document.addEventListener('DOMContentLoaded', function(){
                 }
             },
             disableInput: function(){
-                return {% if under_attack %}true{% else %}false{% endif %} && this.apiKey === "";
+                return (this.settings.keyRequired || {% if under_attack %}true{% else %}false{% endif %}) && this.apiKey === "";
             }
         },
         filters: {
@@ -409,7 +409,7 @@ document.addEventListener('DOMContentLoaded', function(){
                 data.append("source", this.sourceLang);
                 data.append("target", this.targetLang);
                 data.append("api_key", this.apiKey);
-                if (self.apiSecret) data.append("secret", self.apiSecret);
+                if (self.apiSecret) data.append("secret", atob(self.apiSecret));
 
                 this.loadingFileTranslation = true
 

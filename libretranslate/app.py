@@ -1034,24 +1034,37 @@ def create_app(args):
         if args.disable_files_translation:
             abort(400, description=_("Files translation are disabled on this server."))
 
-        filepath = os.path.join(get_upload_dir(), filename)
+        # --- Reject dangerous filenames before any path construction ---
         try:
-            checked_filepath = security.path_traversal_check(filepath, get_upload_dir())
-            if os.path.isfile(checked_filepath):
-                filepath = checked_filepath
+            security.validate_basename(filename)
         except security.SuspiciousFileOperationError:
             abort(400, description=_("Invalid filename"))
 
-        return_data = io.BytesIO()
-        with open(filepath, 'rb') as fo:
-            return_data.write(fo.read())
-        return_data.seek(0)
+        upload_dir = get_upload_dir()
+        filepath = os.path.realpath(os.path.join(upload_dir, filename))
 
-        download_filename = filename.split('.')
-        download_filename.pop(0)
-        download_filename = '.'.join(download_filename)
+        try:
+            checked_filepath = security.path_traversal_check(filepath, upload_dir)
+        except security.SuspiciousFileOperationError:
+            abort(400, description=_("Invalid filename"))
 
-        return send_file(return_data, as_attachment=True, download_name=download_filename)
+        if not os.path.isfile(checked_filepath):
+            abort(404, description=_("File not found"))
+
+        # Strip the UUID prefix that was added during upload
+        download_filename = filename.split('.', 1)
+        if len(download_filename) > 1:
+            download_filename = download_filename[1]
+        else:
+            download_filename = filename
+
+        # Stream directly from disk — never load the whole file into memory.
+        return send_file(
+            checked_filepath,
+            as_attachment=True,
+            download_name=download_filename,
+            conditional=True,
+        )
 
     @bp.post("/detect")
     @access_check
